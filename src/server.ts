@@ -34,7 +34,17 @@ app.get("/db-check", async (req, res) => {
     });
   }
 });
-const PORT = process.env.PORT || 3000;
+async function testDbConnection() {
+  try {
+    const result = await pool.query("SELECT NOW()");
+    console.log("✅ DB Connected:", result.rows[0]);
+  } catch (error) {
+    console.error("❌ DB Connection Error:", error);
+  }
+}
+
+testDbConnection();
+const PORT = Number(process.env.PORT) || 3000;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
