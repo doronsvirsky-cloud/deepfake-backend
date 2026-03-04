@@ -1,126 +1,197 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import axios from "axios";
 import { Pool } from "pg";
 
+console.log("RUNNING SRC SERVER FILE");
+
 dotenv.config();
+
+/* =======================
+   APP INIT
+======================= */
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+/* =======================
+   DATABASE CONNECTION
+======================= */
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const app = express();
-
-app.use(cors());
-app.use(express.json());
+pool.connect()
+  .then(() => {
+    console.log("✅ Connected to PostgreSQL");
+    console.log("DATABASE URL:", process.env.DATABASE_URL);
+  })
+  .catch((err) => console.error("❌ DB Connection Error:", err));
 
 /* =======================
-   BASIC ENDPOINTS
+   HEALTH CHECK
 ======================= */
-
-app.get("/", (req, res) => {
-  res.json({ message: "Deepfake Backend Running 🚀" });
-});
 
 app.get("/health", (req, res) => {
   res.json({
     status: "OK",
-    service: "Deepfake API",
     timestamp: new Date().toISOString(),
   });
 });
 
-app.get("/db-check", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT NOW()");
-    res.json({
-      status: "DB Connected",
-      time: result.rows[0],
-    });
-  } catch (error: any) {
-    res.status(500).json({
-      status: "DB Error",
-      error: error.message,
-    });
-  }
-});
-
 /* =======================
-   USER REGISTRATION
+   RISK ENGINE
 ======================= */
 
-app.post("/register", async (req, res) => {
+app.post("/evaluate-risk", async (req, res) => {
   try {
-    const { full_name, email, national_id } = req.body;
+    console.log("REQUEST BODY:", req.body);
 
-    if (!full_name || !email || !national_id) {
+    const { user_id, device_id, sim_hash } = req.body;
+
+    console.log("DEVICE RECEIVED:", device_id);
+    console.log("DEVICE TYPE:", typeof device_id);
+
+    if (!user_id || !device_id) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    const result = await pool.query(
-      `
-      INSERT INTO users (full_name, email, national_id)
-      VALUES ($1, $2, $3)
-      RETURNING *
-      `,
-      [full_name, email, national_id]
+    /* =======================
+       FETCH DEVICE
+    ======================= */
+
+    const deviceResult = await pool.query(
+      `SELECT device_id, sim_hash, current_sim_hash
+       FROM devices
+       WHERE TRIM(LOWER(device_id)) = TRIM(LOWER($1))`,
+      [device_id]
     );
 
-    res.status(201).json({
-      status: "User registered",
-      user: result.rows[0],
-    });
+    console.log("DEVICE QUERY RESULT:", deviceResult.rows);
 
-  } catch (error: any) {
-    console.error("Registration error:", error);
-    res.status(500).json({
-      error: "Registration failed",
-      details: error.message,
-    });
-  }
-});
-
-/* =======================
-   DEVICE REGISTRATION
-======================= */
-
-app.post("/register-device", async (req, res) => {
-  try {
-    const { user_id, device_id, public_key, sim_hash, android_id } = req.body;
-
-    if (!user_id || !device_id || !public_key) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (deviceResult.rows.length === 0) {
+      console.log("❌ Device lookup failed for:", device_id);
+      return res.status(404).json({ error: "Device not found" });
     }
 
-    // 1️⃣ לבדוק שהמשתמש קיים
-    const userCheck = await pool.query(
-      `SELECT id FROM users WHERE id = $1`,
+    const device = deviceResult.rows[0];
+
+    const storedSimHash =
+      device.current_sim_hash || device.sim_hash;
+
+    let simSwapDetected = false;
+
+    if (storedSimHash && sim_hash && storedSimHash !== sim_hash) {
+      simSwapDetected = true;
+    }
+
+    /* =======================
+       CALL RISK ENGINE
+    ======================= */
+
+    let riskWeight = 0;
+
+    try {
+      const response = await axios.post(
+        "http://localhost:4000/evaluate-risk",
+        req.body
+      );
+
+      riskWeight = response.data?.score || 0;
+
+    } catch (err) {
+      console.log("Risk engine offline, using base score");
+    }
+
+    if (simSwapDetected) {
+      riskWeight += 40;
+
+      console.log("⚠️ SIM SWAP DETECTED for device:", device_id);
+    }
+
+    const eventType = simSwapDetected
+      ? "SIM_SWAP"
+      : "RISK_EVALUATION";
+
+    /* =======================
+       STORE EVENT
+    ======================= */
+
+    const insertResult = await pool.query(
+      `INSERT INTO risk_events
+       (user_id, device_id, event_type, risk_weight, final_score, classification)
+       VALUES ($1,$2,$3,$4,0,'PENDING')
+       RETURNING id`,
+      [user_id, device_id, eventType, riskWeight]
+    );
+
+    const eventId = insertResult.rows[0].id;
+
+    /* =======================
+       CALCULATE 24H WINDOW
+    ======================= */
+
+    const totalResult = await pool.query(
+      `SELECT COALESCE(SUM(risk_weight),0) AS total
+       FROM risk_events
+       WHERE user_id = $1
+       AND created_at > NOW() - INTERVAL '24 hours'`,
       [user_id]
     );
 
-    if (userCheck.rows.length === 0) {
-      return res.status(404).json({ error: "User not found" });
-    }
+    const finalScore = Number(totalResult.rows[0].total);
 
-    // 2️⃣ לרשום את המכשיר
-    const result = await pool.query(
-      `
-      INSERT INTO devices (user_id, device_id, public_key, sim_hash, android_id)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING *
-      `,
-      [user_id, device_id, public_key, sim_hash || null, android_id || null]
+    let classification = "ALLOW";
+
+    if (finalScore >= 70) classification = "BLOCK";
+    else if (finalScore >= 50) classification = "WARNING";
+
+    /* =======================
+       UPDATE EVENT
+    ======================= */
+
+    await pool.query(
+      `UPDATE risk_events
+       SET final_score = $1,
+           classification = $2
+       WHERE id = $3`,
+      [finalScore, classification, eventId]
     );
 
-    res.status(201).json({
-      status: "Device registered",
-      device: result.rows[0],
+    /* =======================
+       UPDATE CURRENT SIM
+    ======================= */
+
+    if (sim_hash) {
+      await pool.query(
+        `UPDATE devices
+         SET current_sim_hash = $1,
+             last_seen_at = NOW()
+         WHERE TRIM(LOWER(device_id)) = TRIM(LOWER($2))`,
+        [sim_hash, device_id]
+      );
+    }
+
+    /* =======================
+       RESPONSE
+    ======================= */
+
+    return res.status(200).json({
+      simSwapDetected,
+      riskWeight,
+      finalScore,
+      classification,
     });
 
   } catch (error: any) {
-    console.error("Device registration error:", error);
-    res.status(500).json({
-      error: "Device registration failed",
+
+    console.error("Risk flow failed:", error.message);
+
+    return res.status(500).json({
+      error: "Risk flow failed",
       details: error.message,
     });
   }
@@ -133,5 +204,5 @@ app.post("/register-device", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Core API running on port ${PORT}`);
 });
