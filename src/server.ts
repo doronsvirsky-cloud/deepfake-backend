@@ -1,9 +1,8 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import axios from "axios";
 import { Pool } from "pg";
-import { markDeviceCompromised } from "./trust/trustEngine";
+import crypto from "crypto";
 
 console.log("RUNNING SRC SERVER FILE");
 
@@ -26,22 +25,21 @@ const pool = new Pool({
 });
 
 pool.connect()
-  .then(() => {
-    console.log("✅ Connected to PostgreSQL");
-    console.log("DATABASE URL:", process.env.DATABASE_URL);
-  })
-  .catch((err) => console.error("❌ DB Connection Error:", err));
+  .then(() => console.log("Connected to PostgreSQL"))
+  .catch((err) => console.error("DB Connection Error:", err));
 
 /* =======================
    HEALTH CHECK
 ======================= */
 
 app.get("/health", (req, res) => {
-  res.json({
+
+  return res.json({
     status: "OK",
     service: "Deepfake API",
     timestamp: new Date().toISOString(),
   });
+
 });
 
 /* =======================
@@ -49,22 +47,19 @@ app.get("/health", (req, res) => {
 ======================= */
 
 app.post("/register-user", async (req, res) => {
+
   try {
 
     const { full_name, national_id, email } = req.body;
 
     if (!full_name || !national_id || !email) {
-      return res.status(400).json({
-        error: "Missing required fields"
-      });
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
     const result = await pool.query(
-      `
-      INSERT INTO users (full_name, national_id, email)
-      VALUES ($1,$2,$3)
-      RETURNING id
-      `,
+      `INSERT INTO users (full_name, national_id, email)
+       VALUES ($1,$2,$3)
+       RETURNING id`,
       [full_name, national_id, email]
     );
 
@@ -72,16 +67,16 @@ app.post("/register-user", async (req, res) => {
       user_id: result.rows[0].id
     });
 
-  } catch (error: any) {
+  } catch (error:any) {
 
     console.error("Register user failed:", error.message);
 
     return res.status(500).json({
-      error: "Register user failed",
-      details: error.message
+      error: "Register user failed"
     });
 
   }
+
 });
 
 /* =======================
@@ -95,18 +90,14 @@ app.post("/add-phone-number", async (req, res) => {
     const { user_id, e164_format, is_primary } = req.body;
 
     if (!user_id || !e164_format) {
-      return res.status(400).json({
-        error: "Missing required fields"
-      });
+      return res.status(400).json({ error: "Missing fields" });
     }
 
     const result = await pool.query(
-      `
-      INSERT INTO phone_numbers
-      (user_id, e164_format, is_primary)
-      VALUES ($1,$2,$3)
-      RETURNING id
-      `,
+      `INSERT INTO phone_numbers
+       (user_id, e164_format, is_primary)
+       VALUES ($1,$2,$3)
+       RETURNING id`,
       [user_id, e164_format, is_primary || false]
     );
 
@@ -114,13 +105,12 @@ app.post("/add-phone-number", async (req, res) => {
       phone_record_id: result.rows[0].id
     });
 
-  } catch (error: any) {
+  } catch (error:any) {
 
     console.error("Add phone number failed:", error.message);
 
     return res.status(500).json({
-      error: "Add phone number failed",
-      details: error.message
+      error: "Add phone number failed"
     });
 
   }
@@ -138,18 +128,14 @@ app.post("/register-device", async (req, res) => {
     const { user_id, device_id, public_key } = req.body;
 
     if (!user_id || !device_id || !public_key) {
-      return res.status(400).json({
-        error: "Missing required fields"
-      });
+      return res.status(400).json({ error: "Missing fields" });
     }
 
     const result = await pool.query(
-      `
-      INSERT INTO devices
-      (user_id, device_id, public_key)
-      VALUES ($1,$2,$3)
-      RETURNING id
-      `,
+      `INSERT INTO devices
+       (user_id, device_id, public_key)
+       VALUES ($1,$2,$3)
+       RETURNING id`,
       [user_id, device_id, public_key]
     );
 
@@ -157,7 +143,7 @@ app.post("/register-device", async (req, res) => {
       device_record_id: result.rows[0].id
     });
 
-  } catch (error: any) {
+  } catch (error:any) {
 
     console.error("Register device failed:", error.message);
 
@@ -170,39 +156,38 @@ app.post("/register-device", async (req, res) => {
 });
 
 /* =======================
-   ADD SIM
+   CALL INIT
 ======================= */
 
-app.post("/add-sim", async (req, res) => {
+app.post("/call-init", async (req, res) => {
 
   try {
 
-    const { device_id, sim_hash } = req.body;
+    const { caller_number, caller_device_id } = req.body;
 
-    if (!device_id || !sim_hash) {
-      return res.status(400).json({
-        error: "Missing fields"
-      });
+    if (!caller_number || !caller_device_id) {
+      return res.status(400).json({ error: "Missing fields" });
     }
 
-    await pool.query(
-      `
-      INSERT INTO device_sims (device_id, sim_hash)
-      VALUES ($1,$2)
-      `,
-      [device_id, sim_hash]
+    const result = await pool.query(
+      `INSERT INTO call_sessions
+       (caller_number, caller_device_id, session_status)
+       VALUES ($1,$2,'PENDING')
+       RETURNING id`,
+      [caller_number, caller_device_id]
     );
 
     return res.json({
-      status: "SIM added"
+      message: "Call initiation stored",
+      session_id: result.rows[0].id
     });
 
-  } catch (error: any) {
+  } catch (error:any) {
 
-    console.error("Add SIM failed:", error.message);
+    console.error(error);
 
     return res.status(500).json({
-      error: "Add SIM failed"
+      error: "Call init failed"
     });
 
   }
@@ -210,40 +195,53 @@ app.post("/add-sim", async (req, res) => {
 });
 
 /* =======================
-   ADD TRUSTED CONTACT
+   AUTH START
 ======================= */
 
-app.post("/add-trusted-contact", async (req, res) => {
+app.post("/auth-start", async (req, res) => {
 
   try {
 
-    const { user_id, contact_name, phone_number } = req.body;
+    const { caller_number, receiver_number, receiver_device_id } = req.body;
 
-    if (!user_id || !phone_number) {
-      return res.status(400).json({
-        error: "Missing fields"
+    const result = await pool.query(
+      `SELECT id
+       FROM call_sessions
+       WHERE caller_number=$1
+       AND session_status='PENDING'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [caller_number]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        message: "No matching call session"
       });
     }
 
+    const session_id = result.rows[0].id;
+
     await pool.query(
-      `
-      INSERT INTO trusted_contacts
-      (user_id, contact_name, phone_number)
-      VALUES ($1,$2,$3)
-      `,
-      [user_id, contact_name, phone_number]
+      `UPDATE call_sessions
+       SET receiver_number=$1,
+           receiver_device_id=$2,
+           session_status='CORRELATED'
+       WHERE id=$3`,
+      [receiver_number, receiver_device_id, session_id]
     );
 
     return res.json({
-      status: "Trusted contact added"
+      message: "Call correlated",
+      session_id
     });
 
-  } catch (error: any) {
+  } catch (error:any) {
 
-    console.error("Add trusted contact failed:", error.message);
+    console.error(error);
 
     return res.status(500).json({
-      error: "Add trusted contact failed"
+      error: "Auth start failed"
     });
 
   }
@@ -251,27 +249,71 @@ app.post("/add-trusted-contact", async (req, res) => {
 });
 
 /* =======================
-   RISK ENGINE
+   CREATE CHALLENGE
 ======================= */
 
-app.post("/evaluate-risk", async (req, res) => {
-
-  console.log("REQUEST BODY:", req.body);
+app.post("/create-challenge", async (req, res) => {
 
   try {
 
-    const { user_id, device_id, sim_hash } = req.body;
+    const { session_id } = req.body;
 
-    if (!user_id || !device_id) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (!session_id) {
+      return res.status(400).json({ error: "Missing session_id" });
     }
+
+    const challenge = crypto.randomUUID();
+
+    await pool.query(
+      `UPDATE call_sessions
+       SET challenge=$1
+       WHERE id=$2`,
+      [challenge, session_id]
+    );
+
+    return res.json({
+      challenge
+    });
+
+  } catch (error:any) {
+
+    console.error(error);
+
+    return res.status(500).json({
+      error: "Challenge creation failed"
+    });
+
+  }
+
+});
+
+/* =======================
+   VERIFY CHALLENGE
+======================= */
+
+app.post("/verify-challenge", async (req, res) => {
+
+  try {
+
+    const { session_id, device_id, signature, role } = req.body;
+
+    if (!session_id || !device_id || !signature || !role) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const sessionResult = await pool.query(
+      `SELECT challenge FROM call_sessions WHERE id=$1`,
+      [session_id]
+    );
+
+    if (sessionResult.rows.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    const challenge = sessionResult.rows[0].challenge;
 
     const deviceResult = await pool.query(
-      `
-      SELECT id, sim_hash, current_sim_hash, trust_score
-      FROM devices
-      WHERE device_id = $1
-      `,
+      `SELECT public_key FROM devices WHERE device_id=$1`,
       [device_id]
     );
 
@@ -279,117 +321,120 @@ app.post("/evaluate-risk", async (req, res) => {
       return res.status(404).json({ error: "Device not found" });
     }
 
-    const device = deviceResult.rows[0];
+    const publicKey = deviceResult.rows[0].public_key;
 
-    const storedSimHash =
-      device.current_sim_hash || device.sim_hash;
+    const verifier = crypto.createVerify("SHA256");
 
-    let simSwapDetected = false;
+    verifier.update(challenge);
+    verifier.end();
 
-    if (storedSimHash && sim_hash && storedSimHash !== sim_hash) {
-      simSwapDetected = true;
+    const verified = verifier.verify(publicKey, signature, "base64");
+
+    if (!verified) {
+      return res.status(401).json({ error: "Invalid signature" });
     }
 
-    let riskWeight = 0;
+    if (role === "caller") {
 
-    try {
-
-      const response = await axios.post(
-        "http://localhost:4000/evaluate-risk",
-        req.body
-      );
-
-      riskWeight = response.data?.score || 0;
-
-    } catch {
-
-      console.log("Risk engine offline → using base score");
-
-    }
-
-    if (simSwapDetected) {
-
-      riskWeight += 40;
-
-      await markDeviceCompromised(
-        device_id,
-        "SIM_SWAP_DETECTED"
+      await pool.query(
+        `UPDATE call_sessions
+         SET caller_verified=true
+         WHERE id=$1`,
+        [session_id]
       );
 
     }
 
-    const eventType = simSwapDetected
-      ? "SIM_SWAP"
-      : "RISK_EVALUATION";
+    if (role === "receiver") {
 
-    const insertResult = await pool.query(
-      `
-      INSERT INTO risk_events
-      (user_id, device_id, event_type, risk_weight, final_score, classification)
-      VALUES ($1,$2,$3,$4,0,'PENDING')
-      RETURNING id
-      `,
-      [user_id, device.id, eventType, riskWeight]
+      await pool.query(
+        `UPDATE call_sessions
+         SET receiver_verified=true
+         WHERE id=$1`,
+        [session_id]
+      );
+
+    }
+
+    const status = await pool.query(
+      `SELECT caller_verified, receiver_verified
+       FROM call_sessions
+       WHERE id=$1`,
+      [session_id]
     );
 
-    const eventId = insertResult.rows[0].id;
+    const mutualAuth =
+      status.rows[0].caller_verified &&
+      status.rows[0].receiver_verified;
 
-    const totalResult = await pool.query(
-      `
-      SELECT COALESCE(SUM(risk_weight),0) AS total
-      FROM risk_events
-      WHERE user_id = $1
-      AND created_at > NOW() - INTERVAL '24 hours'
-      `,
-      [user_id]
+    if (mutualAuth) {
+
+      await pool.query(
+        `UPDATE call_sessions
+         SET session_status='AUTHENTICATED'
+         WHERE id=$1`,
+        [session_id]
+      );
+
+    }
+
+    return res.json({
+      verified: true,
+      mutual_authentication: mutualAuth
+    });
+
+  } catch (error) {
+
+    console.error("Verify challenge error:", error);
+
+    return res.status(500).json({
+      error: "Verification failed"
+    });
+
+  }
+
+});
+
+/* =======================
+   HEARTBEAT
+======================= */
+
+app.post("/heartbeat", async (req, res) => {
+
+  try {
+
+    const { session_id, device_id } = req.body;
+
+    if (!session_id || !device_id) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const session = await pool.query(
+      `SELECT id FROM call_sessions WHERE id=$1`,
+      [session_id]
     );
 
-    const finalScore = Number(totalResult.rows[0].total);
-
-    const trustScore = device.trust_score ?? 100;
-
-    let classification = "ALLOW";
-
-    if (finalScore >= 70 || trustScore <= 20)
-      classification = "BLOCK";
-
-    else if (finalScore >= 50 || trustScore <= 50)
-      classification = "WARNING";
-
-    let action = "ALLOW";
-
-    if (classification === "BLOCK")
-      action = "BLOCK";
-
-    else if (classification === "WARNING")
-      action = "STEP_UP";
+    if (session.rows.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     await pool.query(
-      `
-      UPDATE risk_events
-      SET final_score = $1,
-          classification = $2
-      WHERE id = $3
-      `,
-      [finalScore, classification, eventId]
+      `UPDATE call_sessions
+       SET last_heartbeat = NOW()
+       WHERE id=$1`,
+      [session_id]
     );
 
     return res.json({
-      simSwapDetected,
-      riskWeight,
-      finalScore,
-      trustScore,
-      classification,
-      action
+      status: "heartbeat received"
     });
 
-  } catch (error: any) {
+  } catch (error) {
 
-    console.error("Risk flow failed:", error.message);
+    console.error("Heartbeat error:", error);
 
     return res.status(500).json({
-      error: "Risk flow failed",
-      details: error.message,
+      error: "Heartbeat failed"
     });
 
   }
@@ -403,5 +448,7 @@ app.post("/evaluate-risk", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
+
   console.log(`Core API running on port ${PORT}`);
+
 });
