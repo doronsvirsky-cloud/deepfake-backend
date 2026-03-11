@@ -1,0 +1,100 @@
+import { pool } from "../db/client";
+
+interface ReputationResult {
+  score: number;
+  level: "LOW" | "MEDIUM" | "HIGH" | "BLOCK";
+  reasons: string[];
+}
+
+export async function evaluateDeviceReputation(
+  device_id: string
+): Promise<ReputationResult> {
+
+  let score = 0;
+  const reasons: string[] = [];
+
+  /* =========================
+     FAILED AUTH ATTEMPTS
+  ========================= */
+
+  const failedAuth = await pool.query(
+    `
+    SELECT COUNT(*) as count
+    FROM risk_events
+    WHERE device_id=$1
+    AND event_type='AUTH_FAIL'
+    AND created_at > NOW() - INTERVAL '24 hours'
+    `,
+    [device_id]
+  );
+
+  const failCount = Number(failedAuth.rows[0].count);
+
+  if (failCount > 5) {
+
+    score += 40;
+    reasons.push("Multiple authentication failures");
+
+  }
+
+  /* =========================
+     SIM SWAP HISTORY
+  ========================= */
+
+  const simSwap = await pool.query(
+    `
+    SELECT COUNT(*) as count
+    FROM risk_events
+    WHERE device_id=$1
+    AND event_type='SIM_SWAP'
+    AND created_at > NOW() - INTERVAL '30 days'
+    `,
+    [device_id]
+  );
+
+  const swapCount = Number(simSwap.rows[0].count);
+
+  if (swapCount > 0) {
+
+    score += 50;
+    reasons.push("Recent SIM swap detected");
+
+  }
+
+  /* =========================
+     DEVICE STATUS
+  ========================= */
+
+  const deviceStatus = await pool.query(
+    `
+    SELECT status
+    FROM devices
+    WHERE device_id=$1
+    `,
+    [device_id]
+  );
+
+  if (!deviceStatus.rows.length) {
+
+    score += 100;
+    reasons.push("Unknown device");
+
+  }
+
+  /* =========================
+     DETERMINE LEVEL
+  ========================= */
+
+  let level: ReputationResult["level"] = "LOW";
+
+  if (score >= 80) level = "BLOCK";
+  else if (score >= 50) level = "HIGH";
+  else if (score >= 20) level = "MEDIUM";
+
+  return {
+    score,
+    level,
+    reasons
+  };
+
+}

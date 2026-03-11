@@ -1,4 +1,4 @@
-import { pool } from "./db/client";
+import { pool } from "../db/client";
 import { v4 as uuidv4 } from "uuid";
 
 interface RiskPayload {
@@ -7,10 +7,11 @@ interface RiskPayload {
   phone_id: string;
   event_type: string;
   risk_weight: number;
-  metadata?: any;
+  metadata?: Record<string, any>;
 }
 
 export async function evaluateRisk(payload: RiskPayload) {
+
   const {
     user_id,
     device_id,
@@ -21,28 +22,38 @@ export async function evaluateRisk(payload: RiskPayload) {
   } = payload;
 
   const eventId = uuidv4();
-// Validate device exists and belongs to user
-const deviceCheck = await pool.query(
-  `
-  SELECT id, user_id, status
-  FROM devices
-  WHERE id = $1
-  `,
-  [device_id]
-);
 
-if (deviceCheck.rows.length === 0) {
-  throw new Error("Device not found");
-}
+  /* =======================
+     DEVICE VALIDATION
+  ======================= */
 
-if (deviceCheck.rows[0].user_id !== user_id) {
-  throw new Error("Device does not belong to user");
-}
+  const deviceCheck = await pool.query(
+    `
+    SELECT id, user_id, status, reputation_score
+    FROM devices
+    WHERE device_id = $1
+    `,
+    [device_id]
+  );
 
-if (deviceCheck.rows[0].status !== "ACTIVE") {
-  throw new Error("Device is not active");
-}
-  // Insert risk event
+  if (deviceCheck.rows.length === 0) {
+    throw new Error("Device not found");
+  }
+
+  if (deviceCheck.rows[0].user_id !== user_id) {
+    throw new Error("Device does not belong to user");
+  }
+
+  if (deviceCheck.rows[0].status !== "ACTIVE") {
+    throw new Error("Device is not active");
+  }
+
+  const reputation = deviceCheck.rows[0].reputation_score ?? 80;
+
+  /* =======================
+     STORE RISK EVENT
+  ======================= */
+
   await pool.query(
     `
     INSERT INTO risk_events 
@@ -61,7 +72,27 @@ if (deviceCheck.rows[0].status !== "ACTIVE") {
     ]
   );
 
-  // Calculate risk score (last 30 days for this phone)
+  /* =======================
+     UPDATE DEVICE REPUTATION
+  ======================= */
+
+  await pool.query(
+    `
+    UPDATE devices
+    SET reputation_score =
+      GREATEST(0, reputation_score - $1)
+    WHERE device_id=$2
+    `,
+    [
+      risk_weight,
+      device_id
+    ]
+  );
+
+  /* =======================
+     CALCULATE RISK SCORE
+  ======================= */
+
   const result = await pool.query(
     `
     SELECT COALESCE(SUM(risk_weight),0) as score
@@ -74,7 +105,16 @@ if (deviceCheck.rows[0].status !== "ACTIVE") {
 
   const score = Number(result.rows[0]?.score || 0);
 
-  // Get policy decision
+  /* =======================
+     COMBINE WITH DEVICE REPUTATION
+  ======================= */
+
+  const adjustedScore = Math.max(0, score - reputation / 5);
+
+  /* =======================
+     POLICY DECISION
+  ======================= */
+
   const policy = await pool.query(
     `
     SELECT decision
@@ -82,10 +122,16 @@ if (deviceCheck.rows[0].status !== "ACTIVE") {
     WHERE $1 BETWEEN min_score AND max_score
     LIMIT 1
     `,
-    [score]
+    [adjustedScore]
   );
 
-  const decision = policy.rows[0]?.decision || "ALLOW";
+  const decision = policy.rows[0]?.decision || "BLOCK";
 
-  return { score, decision };
+  return {
+    risk_score: score,
+    reputation,
+    adjusted_score: adjustedScore,
+    decision
+  };
+
 }
