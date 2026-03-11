@@ -4,57 +4,65 @@ import { v4 as uuidv4 } from "uuid";
 interface RiskPayload {
   user_id: string;
   device_id: string;
-  phone_id: string;
+  phone_number: string;
   event_type: string;
   risk_weight: number;
-  metadata?: any;
 }
 
 export async function evaluateRisk(payload: RiskPayload) {
+
   const {
     user_id,
     device_id,
-    phone_id,
+    phone_number,
     event_type,
-    risk_weight,
-    metadata,
+    risk_weight
   } = payload;
 
   const eventId = uuidv4();
 
-  // Insert risk event
+  /* =======================
+     INSERT RISK EVENT
+  ======================= */
+
   await pool.query(
     `
-    INSERT INTO risk_events 
-    (id, event_id, user_id, device_id, phone_id, event_type, risk_weight, metadata)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    INSERT INTO risk_events
+    (id, event_id, user_id, device_id, phone_number, event_type, risk_weight, final_score)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
     `,
     [
       uuidv4(),
       eventId,
       user_id,
       device_id,
-      phone_id,
+      phone_number,
       event_type,
       risk_weight,
-      metadata || {},
+      risk_weight
     ]
   );
 
-  // Calculate risk score (last 30 days for this phone)
+  /* =======================
+     CALCULATE RISK SCORE
+  ======================= */
+
   const result = await pool.query(
     `
     SELECT COALESCE(SUM(risk_weight),0) as score
     FROM risk_events
-    WHERE phone_id = $1
+    WHERE phone_number = $1
     AND created_at > NOW() - INTERVAL '30 days'
     `,
-    [phone_id]
+    [phone_number]
   );
 
   const score = Number(result.rows[0]?.score || 0);
 
-  // Get policy decision
+  /* =======================
+     POLICY DECISION
+  ======================= */
+
   const policy = await pool.query(
     `
     SELECT decision
@@ -67,5 +75,9 @@ export async function evaluateRisk(payload: RiskPayload) {
 
   const decision = policy.rows[0]?.decision || "ALLOW";
 
-  return { score, decision };
+  return {
+    score,
+    decision
+  };
+
 }
