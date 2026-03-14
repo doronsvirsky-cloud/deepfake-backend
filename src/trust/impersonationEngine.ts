@@ -11,6 +11,15 @@ export async function detectImpersonation(
 
   try {
 
+    if (!phone_number || !device_id) {
+
+      return {
+        status: "INVALID_REQUEST",
+        risk: 50
+      };
+
+    }
+
     const result = await pool.query<DeviceRow>(
       `
       SELECT d.device_id
@@ -27,10 +36,14 @@ export async function detectImpersonation(
     ======================= */
 
     if (result.rows.length === 0) {
+
+      console.log("⚠ UNKNOWN NUMBER ATTEMPT:", phone_number);
+
       return {
         status: "UNKNOWN_NUMBER",
         risk: 30
       };
+
     }
 
     /* =======================
@@ -44,10 +57,17 @@ export async function detectImpersonation(
     ======================= */
 
     if (!knownDevices.includes(device_id)) {
+
+      console.log("🚨 IMPERSONATION DETECTED");
+      console.log("Number:", phone_number);
+      console.log("Device used:", device_id);
+      console.log("Known devices:", knownDevices);
+
       return {
         status: "IMPERSONATION_SUSPECTED",
         risk: 80
       };
+
     }
 
     /* =======================
