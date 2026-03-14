@@ -10,5 +10,9 @@
     "skipLibCheck": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "risk-engine"]
+  "exclude": [
+    "node_modules",
+    "risk-engine",
+    "dist"
+  ]
 }
